@@ -26,6 +26,7 @@ class RedisTaskStatusMixin:
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
         self.redis_prefix = "docling:tasks:"
+        self._task_errors: dict[str, str] = {}
         self._redis_pool = redis.ConnectionPool.from_url(
             self.config.redis_url,
             max_connections=10,
@@ -218,6 +219,34 @@ class RedisTaskStatusMixin:
                 )
         except Exception as e:
             _log.error(f"Store task {task.task_id}: {e}")
+
+    async def store_task_error(self, task_id: str, error_message: str) -> None:
+        """Store an error message for a failed task in memory and Redis."""
+        self._task_errors[task_id] = error_message
+        try:
+            async with redis.Redis(connection_pool=self._redis_pool) as r:
+                await r.set(
+                    f"{self.redis_prefix}{task_id}:error",
+                    error_message,
+                    ex=86400,
+                )
+        except Exception as e:
+            _log.error(f"Store task error {task_id}: {e}")
+
+    async def get_task_error(self, task_id: str) -> str | None:
+        """Retrieve the error message for a failed task."""
+        if task_id in self._task_errors:
+            return self._task_errors[task_id]
+        try:
+            async with redis.Redis(connection_pool=self._redis_pool) as r:
+                error_data = await r.get(f"{self.redis_prefix}{task_id}:error")
+                if error_data:
+                    error_msg = error_data.decode("utf-8")
+                    self._task_errors[task_id] = error_msg
+                    return error_msg
+        except Exception as e:
+            _log.error(f"Redis get task error {task_id}: {e}")
+        return None
 
     async def enqueue(self, **kwargs):  # type: ignore[override]
         task = await super().enqueue(**kwargs)  # type: ignore[misc]

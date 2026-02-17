@@ -30,6 +30,17 @@ class WebsocketNotifier(BaseNotifier):
 
             del self.task_subscribers[task_id]
 
+    async def _send_to_subscriber(
+        self, websocket: WebSocket, message: str
+    ) -> bool:
+        """Send a message to a single subscriber. Returns False if send failed."""
+        try:
+            await websocket.send_text(message)
+            return True
+        except Exception as e:
+            _log.warning(f"Failed to send to WebSocket subscriber: {e}")
+            return False
+
     async def notify_task_subscribers(self, task_id: str):
         if task_id not in self.task_subscribers:
             _log.debug(
@@ -41,27 +52,52 @@ class WebsocketNotifier(BaseNotifier):
             # Get task status from Redis or RQ directly instead of in-memory registry
             task = await self.orchestrator.task_status(task_id=task_id)
             task_queue_position = await self.orchestrator.get_queue_position(task_id)
+
+            error_detail = None
+            if task.task_status == TaskStatus.FAILURE:
+                if hasattr(self.orchestrator, "get_task_error"):
+                    error_detail = await self.orchestrator.get_task_error(task_id)
+
             msg = TaskStatusResponse(
                 task_id=task.task_id,
                 task_type=task.task_type,
                 task_status=task.task_status,
                 task_position=task_queue_position,
                 task_meta=task.processing_meta,
+                error_detail=error_detail,
             )
+            update_text = WebsocketMessage(
+                message=MessageKind.UPDATE, task=msg
+            ).model_dump_json()
+
+            failed_subscribers: list[WebSocket] = []
             for websocket in self.task_subscribers[task_id]:
-                await websocket.send_text(
-                    WebsocketMessage(
-                        message=MessageKind.UPDATE, task=msg
-                    ).model_dump_json()
-                )
-                if task.is_completed():
-                    await websocket.close()
+                ok = await self._send_to_subscriber(websocket, update_text)
+                if ok and task.is_completed():
+                    try:
+                        await websocket.close()
+                    except Exception:
+                        pass
+                elif not ok:
+                    failed_subscribers.append(websocket)
+
+            # Remove failed subscribers
+            for ws in failed_subscribers:
+                self.task_subscribers[task_id].discard(ws)
+
         except Exception as e:
             _log.error(f"Error notifying subscribers for task {task_id}: {e}")
+            # Attempt to send error message to all subscribers
+            error_text = WebsocketMessage(
+                message=MessageKind.ERROR,
+                error=f"Failed to retrieve task status: {e}",
+            ).model_dump_json()
+            for websocket in list(self.task_subscribers.get(task_id, [])):
+                await self._send_to_subscriber(websocket, error_text)
 
     async def notify_queue_positions(self):
         """Notify all subscribers of pending tasks about queue position updates."""
-        for task_id in self.task_subscribers.keys():
+        for task_id in list(self.task_subscribers.keys()):
             try:
                 # Check task status directly from Redis or RQ
                 task = await self.orchestrator.task_status(task_id)

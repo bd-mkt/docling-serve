@@ -44,6 +44,7 @@ from docling_jobkit.datamodel.chunking import (
 from docling_jobkit.datamodel.http_inputs import FileSource, HttpSource
 from docling_jobkit.datamodel.s3_coords import S3Coordinates
 from docling_jobkit.datamodel.task import Task, TaskSource, TaskType
+from docling_jobkit.datamodel.task_meta import TaskStatus
 from docling_jobkit.datamodel.task_targets import (
     InBodyTarget,
     ZipTarget,
@@ -355,16 +356,67 @@ def create_app():  # noqa: C901
         )
         return task
 
-    async def _wait_task_complete(orchestrator: BaseOrchestrator, task_id: str) -> bool:
+    async def _wait_task_complete(
+        orchestrator: BaseOrchestrator, task_id: str
+    ) -> Task | None:
+        """Wait for task completion. Returns the Task if completed, None on timeout."""
         start_time = time.monotonic()
         while True:
             task = await orchestrator.task_status(task_id=task_id)
             if task.is_completed():
-                return True
+                return task
             await asyncio.sleep(docling_serve_settings.sync_poll_interval)
             elapsed_time = time.monotonic() - start_time
             if elapsed_time > docling_serve_settings.max_sync_wait:
-                return False
+                return None
+
+    async def _get_task_error(orchestrator: BaseOrchestrator, task_id: str) -> str | None:
+        """Retrieve error detail for a failed task, if available."""
+        if hasattr(orchestrator, "get_task_error"):
+            return await orchestrator.get_task_error(task_id)
+        return None
+
+    async def _check_sync_result(
+        orchestrator: BaseOrchestrator,
+        background_tasks: BackgroundTasks,
+        task: Task,
+        completed_task: Task | None,
+    ):
+        """
+        Common handler for sync endpoints after _wait_task_complete.
+        Raises on timeout or failure, returns the response on success.
+        """
+        task_id = task.task_id
+
+        if completed_task is None:
+            raise HTTPException(
+                status_code=504,
+                detail=(
+                    f"Conversion is taking too long. The maximum wait time is "
+                    f"configured as DOCLING_SERVE_MAX_SYNC_WAIT="
+                    f"{docling_serve_settings.max_sync_wait}."
+                ),
+            )
+
+        if completed_task.task_status == TaskStatus.FAILURE:
+            error_detail = await _get_task_error(orchestrator, task_id)
+            raise HTTPException(
+                status_code=500,
+                detail=error_detail or "Task failed without additional details.",
+            )
+
+        task_result = await orchestrator.task_result(task_id=task_id)
+        if task_result is None:
+            raise HTTPException(
+                status_code=404,
+                detail="Task result not found. Please wait for a completion status.",
+            )
+        return await prepare_response(
+            task_id=task_id,
+            task_result=task_result,
+            orchestrator=orchestrator,
+            background_tasks=background_tasks,
+        )
 
     ##########################################
     # Downgrade openapi 3.1 to 3.0.x helpers #
@@ -498,30 +550,12 @@ def create_app():  # noqa: C901
         task = await _enque_source(
             orchestrator=orchestrator, request=conversion_request
         )
-        completed = await _wait_task_complete(
+        completed_task = await _wait_task_complete(
             orchestrator=orchestrator, task_id=task.task_id
         )
-
-        if not completed:
-            # TODO: abort task!
-            raise HTTPException(
-                status_code=504,
-                detail=f"Conversion is taking too long. The maximum wait time is configure as DOCLING_SERVE_MAX_SYNC_WAIT={docling_serve_settings.max_sync_wait}.",
-            )
-
-        task_result = await orchestrator.task_result(task_id=task.task_id)
-        if task_result is None:
-            raise HTTPException(
-                status_code=404,
-                detail="Task result not found. Please wait for a completion status.",
-            )
-        response = await prepare_response(
-            task_id=task.task_id,
-            task_result=task_result,
-            orchestrator=orchestrator,
-            background_tasks=background_tasks,
+        return await _check_sync_result(
+            orchestrator, background_tasks, task, completed_task
         )
-        return response
 
     # Convert a document from file(s)
     @app.post(
@@ -554,30 +588,12 @@ def create_app():  # noqa: C901
             chunking_export_options=None,
             target=target,
         )
-        completed = await _wait_task_complete(
+        completed_task = await _wait_task_complete(
             orchestrator=orchestrator, task_id=task.task_id
         )
-
-        if not completed:
-            # TODO: abort task!
-            raise HTTPException(
-                status_code=504,
-                detail=f"Conversion is taking too long. The maximum wait time is configure as DOCLING_SERVE_MAX_SYNC_WAIT={docling_serve_settings.max_sync_wait}.",
-            )
-
-        task_result = await orchestrator.task_result(task_id=task.task_id)
-        if task_result is None:
-            raise HTTPException(
-                status_code=404,
-                detail="Task result not found. Please wait for a completion status.",
-            )
-        response = await prepare_response(
-            task_id=task.task_id,
-            task_result=task_result,
-            orchestrator=orchestrator,
-            background_tasks=background_tasks,
+        return await _check_sync_result(
+            orchestrator, background_tasks, task, completed_task
         )
-        return response
 
     # Convert a document from URL(s) using the async api
     @app.post(
@@ -754,30 +770,12 @@ def create_app():  # noqa: C901
             request: req_cls,
         ):
             task = await _enque_source(orchestrator=orchestrator, request=request)
-            completed = await _wait_task_complete(
+            completed_task = await _wait_task_complete(
                 orchestrator=orchestrator, task_id=task.task_id
             )
-
-            if not completed:
-                # TODO: abort task!
-                raise HTTPException(
-                    status_code=504,
-                    detail=f"Conversion is taking too long. The maximum wait time is configure as DOCLING_SERVE_MAX_SYNC_WAIT={docling_serve_settings.max_sync_wait}.",
-                )
-
-            task_result = await orchestrator.task_result(task_id=task.task_id)
-            if task_result is None:
-                raise HTTPException(
-                    status_code=404,
-                    detail="Task result not found. Please wait for a completion status.",
-                )
-            response = await prepare_response(
-                task_id=task.task_id,
-                task_result=task_result,
-                orchestrator=orchestrator,
-                background_tasks=background_tasks,
+            return await _check_sync_result(
+                orchestrator, background_tasks, task, completed_task
             )
-            return response
 
         @app.post(
             f"/v1/chunk/{path_name}/file",
@@ -836,30 +834,12 @@ def create_app():  # noqa: C901
                 ),
                 target=target,
             )
-            completed = await _wait_task_complete(
+            completed_task = await _wait_task_complete(
                 orchestrator=orchestrator, task_id=task.task_id
             )
-
-            if not completed:
-                # TODO: abort task!
-                raise HTTPException(
-                    status_code=504,
-                    detail=f"Conversion is taking too long. The maximum wait time is configure as DOCLING_SERVE_MAX_SYNC_WAIT={docling_serve_settings.max_sync_wait}.",
-                )
-
-            task_result = await orchestrator.task_result(task_id=task.task_id)
-            if task_result is None:
-                raise HTTPException(
-                    status_code=404,
-                    detail="Task result not found. Please wait for a completion status.",
-                )
-            response = await prepare_response(
-                task_id=task.task_id,
-                task_result=task_result,
-                orchestrator=orchestrator,
-                background_tasks=background_tasks,
+            return await _check_sync_result(
+                orchestrator, background_tasks, task, completed_task
             )
-            return response
 
     # Task status poll
     @app.get(
@@ -881,12 +861,18 @@ def create_app():  # noqa: C901
             task_queue_position = await orchestrator.get_queue_position(task_id=task_id)
         except TaskNotFoundError:
             raise HTTPException(status_code=404, detail="Task not found.")
+
+        error_detail = None
+        if task.task_status == TaskStatus.FAILURE:
+            error_detail = await _get_task_error(orchestrator, task_id)
+
         return TaskStatusResponse(
             task_id=task.task_id,
             task_type=task.task_type,
             task_status=task.task_status,
             task_position=task_queue_position,
             task_meta=task.processing_meta,
+            error_detail=error_detail,
         )
 
     # Task status websocket
@@ -926,12 +912,18 @@ def create_app():  # noqa: C901
 
         try:
             task_queue_position = await orchestrator.get_queue_position(task_id=task_id)
+
+            init_error_detail = None
+            if task.task_status == TaskStatus.FAILURE:
+                init_error_detail = await _get_task_error(orchestrator, task_id)
+
             task_response = TaskStatusResponse(
                 task_id=task.task_id,
                 task_type=task.task_type,
                 task_status=task.task_status,
                 task_position=task_queue_position,
                 task_meta=task.processing_meta,
+                error_detail=init_error_detail,
             )
             await websocket.send_text(
                 WebsocketMessage(
@@ -939,24 +931,36 @@ def create_app():  # noqa: C901
                 ).model_dump_json()
             )
             while True:
+                # each client message will be interpreted as a request for update
+                msg = await websocket.receive_text()
+                _log.debug(f"Received message: {msg}")
+
+                # Re-fetch fresh task status on each iteration
+                task = await orchestrator.task_status(task_id=task_id)
                 task_queue_position = await orchestrator.get_queue_position(
                     task_id=task_id
                 )
+
+                error_detail = None
+                if task.task_status == TaskStatus.FAILURE:
+                    error_detail = await _get_task_error(orchestrator, task_id)
+
                 task_response = TaskStatusResponse(
                     task_id=task.task_id,
                     task_type=task.task_type,
                     task_status=task.task_status,
                     task_position=task_queue_position,
                     task_meta=task.processing_meta,
+                    error_detail=error_detail,
                 )
                 await websocket.send_text(
                     WebsocketMessage(
                         message=MessageKind.UPDATE, task=task_response
                     ).model_dump_json()
                 )
-                # each client message will be interpreted as a request for update
-                msg = await websocket.receive_text()
-                _log.debug(f"Received message: {msg}")
+                if task.is_completed():
+                    await websocket.close()
+                    break
 
         except WebSocketDisconnect:
             _log.info(f"WebSocket disconnected for job {task_id}")
@@ -986,6 +990,18 @@ def create_app():  # noqa: C901
         try:
             task_result = await orchestrator.task_result(task_id=task_id)
             if task_result is None:
+                # Check if the task failed — return the error instead of a generic 404
+                try:
+                    task = await orchestrator.task_status(task_id=task_id)
+                    if task.task_status == TaskStatus.FAILURE:
+                        error_detail = await _get_task_error(orchestrator, task_id)
+                        raise HTTPException(
+                            status_code=500,
+                            detail=error_detail
+                            or "Task failed without additional details.",
+                        )
+                except TaskNotFoundError:
+                    pass
                 raise HTTPException(
                     status_code=404,
                     detail="Task result not found. Please wait for a completion status.",

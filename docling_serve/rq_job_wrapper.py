@@ -188,17 +188,40 @@ def instrumented_docling_task(  # noqa: C901
             return result_key
 
         except Exception as e:
-            # Notify task failure
+            error_message = f"{type(e).__name__}: {e}"
+
+            # Store error message in Redis so API can retrieve it
             try:
-                conn.publish(
-                    orchestrator_config.sub_channel,
-                    _TaskUpdate(
-                        task_id=task_id,
-                        task_status=TaskStatus.FAILURE,
-                    ).model_dump_json(),
+                error_key = f"docling:tasks:{task_id}:error"
+                conn.setex(error_key, 86400, error_message)
+            except Exception as store_err:
+                logger.warning(
+                    f"Failed to store error for task {task_id}: {store_err}"
                 )
-            except Exception:
-                pass
+
+            # Notify task failure with retry
+            published = False
+            for attempt in range(2):
+                try:
+                    conn.publish(
+                        orchestrator_config.sub_channel,
+                        _TaskUpdate(
+                            task_id=task_id,
+                            task_status=TaskStatus.FAILURE,
+                        ).model_dump_json(),
+                    )
+                    published = True
+                    break
+                except Exception as pub_err:
+                    logger.warning(
+                        f"Failure publish attempt {attempt + 1} for task "
+                        f"{task_id}: {pub_err}"
+                    )
+
+            if not published:
+                logger.error(
+                    f"Could not publish failure notification for task {task_id}"
+                )
 
             # Clean up on error
             workdir = scratch_dir / task_id
