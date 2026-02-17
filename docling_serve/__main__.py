@@ -15,6 +15,23 @@ from docling_serve.storage import get_scratch
 
 warnings.filterwarnings(action="ignore", category=UserWarning, module="pydantic|torch")
 warnings.filterwarnings(action="ignore", category=FutureWarning, module="easyocr")
+import os
+
+if os.getenv("FIPS_PATCH", "0") == "1":
+    import functools
+    import hashlib
+
+    # Original MD5
+    _old_md5 = hashlib.md5
+
+    # Monkeypatched MD5
+    @functools.wraps(_old_md5)
+    def _new_md5(data=b"", usedforsecurity=False, **kwargs):
+        # Set usedforsecurity=False to bypass FIPS error
+        return _old_md5(data, usedforsecurity=False, **kwargs)
+
+    # Apply the patch
+    hashlib.md5 = _new_md5
 
 
 err_console = Console(stderr=True)

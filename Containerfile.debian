@@ -1,0 +1,84 @@
+ARG BASE_IMAGE=python:3.12-slim-trixie
+
+ARG UV_IMAGE=ghcr.io/astral-sh/uv:0.8.19
+
+ARG UV_SYNC_EXTRA_ARGS=""
+
+FROM ${BASE_IMAGE} AS docling-base
+
+###################################################################################################
+# OS Layer                                                                                        #
+###################################################################################################
+
+RUN --mount=type=bind,source=os-packages.txt,target=/tmp/debian-packages.txt \
+    apt-get update && \
+    apt-get install -y --no-install-recommends $(cat /tmp/debian-packages.txt) && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
+
+ENV TESSDATA_PREFIX=/usr/share/tesseract-ocr/5/tessdata/
+
+FROM ${UV_IMAGE} AS uv_stage
+
+###################################################################################################
+# Docling layer                                                                                   #
+###################################################################################################
+
+FROM docling-base
+
+RUN --mount=from=uv_stage,source=/uv,target=/bin/uv \
+    uv venv /opt/app-root && \
+    mkdir -p /opt/app-root/src/.cache
+
+RUN groupadd -g 1000 docling && \
+  useradd -u 1000 -r -g 1000 -d /opt/app-root/src -c "docling" docling && \
+  chown -R 1000:1000 /opt/app-root
+USER 1000
+
+WORKDIR /opt/app-root/src
+
+ENV \
+    PATH="/opt/app-root/bin:${PATH}" \
+    VIRTUAL_ENV=/opt/app-root \
+    OMP_NUM_THREADS=4 \
+    LANG=C.UTF-8 \
+    LC_ALL=C.UTF-8 \
+    PYTHONIOENCODING=utf-8 \
+    UV_COMPILE_BYTECODE=1 \
+    UV_LINK_MODE=copy \
+    UV_PROJECT_ENVIRONMENT=/opt/app-root \
+    DOCLING_SERVE_ARTIFACTS_PATH=/opt/app-root/src/.cache/docling/models
+
+ARG UV_SYNC_EXTRA_ARGS=-no-group pypi --group cu128
+
+RUN --mount=from=uv_stage,source=/uv,target=/bin/uv \
+    --mount=type=cache,target=/opt/app-root/src/.cache/uv,uid=1000 \
+    --mount=type=bind,source=uv.lock,target=uv.lock \
+    --mount=type=bind,source=pyproject.toml,target=pyproject.toml \
+    umask 002 && \
+    UV_SYNC_ARGS="--frozen --no-install-project --no-dev --all-extras" && \
+    uv sync ${UV_SYNC_ARGS} ${UV_SYNC_EXTRA_ARGS} --no-extra flash-attn && \
+    FLASH_ATTENTION_SKIP_CUDA_BUILD=TRUE uv sync ${UV_SYNC_ARGS} ${UV_SYNC_EXTRA_ARGS} --no-build-isolation-package=flash-attn
+
+ARG MODELS_LIST="layout tableformer picture_classifier rapidocr easyocr"
+
+#RUN echo "Downloading models..." && \
+#    HF_HUB_DOWNLOAD_TIMEOUT="90" \
+#    HF_HUB_ETAG_TIMEOUT="90" \
+#    docling-tools models download -o "${DOCLING_SERVE_ARTIFACTS_PATH}" ${MODELS_LIST} && \
+#    chown -R 1000:0 ${DOCLING_SERVE_ARTIFACTS_PATH} && \
+#    chmod -R g=u ${DOCLING_SERVE_ARTIFACTS_PATH}
+
+COPY --chown=1000:0 ./docling_serve ./docling_serve
+
+RUN --mount=from=uv_stage,source=/uv,target=/bin/uv \
+    --mount=type=cache,target=/opt/app-root/src/.cache/uv,uid=1000 \
+    --mount=type=bind,source=uv.lock,target=uv.lock \
+    --mount=type=bind,source=pyproject.toml,target=pyproject.toml \
+    umask 002 && uv sync --frozen --no-dev --all-extras ${UV_SYNC_EXTRA_ARGS} && \
+    sed -i 's/hash_md5 = hashlib.md5()/hash_md5 = hashlib.md5(usedforsecurity=False)/' /opt/app-root/lib/python3.12/site-packages/easyocr/utils.py
+
+
+EXPOSE 5001
+
+CMD ["docling-serve", "run"]

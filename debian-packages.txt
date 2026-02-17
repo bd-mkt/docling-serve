@@ -1,0 +1,16 @@
+tesseract-ocr
+libtesseract-dev
+tesseract-ocr-eng
+libleptonica-dev
+libgl1
+libglib2.0-0
+libavformat-dev
+libavcodec-dev
+libavdevice-dev
+libavutil-dev
+libavfilter-dev
+libswscale-dev
+libswresample-dev
+pkg-config
+build-essential
+curl
