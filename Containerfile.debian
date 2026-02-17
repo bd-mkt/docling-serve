@@ -10,7 +10,7 @@ FROM ${BASE_IMAGE} AS docling-base
 # OS Layer                                                                                        #
 ###################################################################################################
 
-RUN --mount=type=bind,source=os-packages.txt,target=/tmp/debian-packages.txt \
+RUN --mount=type=bind,source=debian-packages.txt,target=/tmp/debian-packages.txt \
     apt-get update && \
     apt-get install -y --no-install-recommends $(cat /tmp/debian-packages.txt) && \
     apt-get clean && \
