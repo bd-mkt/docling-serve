@@ -53,18 +53,13 @@ class WebsocketNotifier(BaseNotifier):
             task = await self.orchestrator.task_status(task_id=task_id)
             task_queue_position = await self.orchestrator.get_queue_position(task_id)
 
-            error_detail = None
-            if task.task_status == TaskStatus.FAILURE:
-                if hasattr(self.orchestrator, "get_task_error"):
-                    error_detail = await self.orchestrator.get_task_error(task_id)
-
             msg = TaskStatusResponse(
                 task_id=task.task_id,
                 task_type=task.task_type,
                 task_status=task.task_status,
                 task_position=task_queue_position,
                 task_meta=task.processing_meta,
-                error_detail=error_detail,
+                error_detail=task.error_message,
             )
             update_text = WebsocketMessage(
                 message=MessageKind.UPDATE, task=msg

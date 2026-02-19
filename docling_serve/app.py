@@ -370,12 +370,6 @@ def create_app():  # noqa: C901
             if elapsed_time > docling_serve_settings.max_sync_wait:
                 return None
 
-    async def _get_task_error(orchestrator: BaseOrchestrator, task_id: str) -> str | None:
-        """Retrieve error detail for a failed task, if available."""
-        if hasattr(orchestrator, "get_task_error"):
-            return await orchestrator.get_task_error(task_id)
-        return None
-
     async def _check_sync_result(
         orchestrator: BaseOrchestrator,
         background_tasks: BackgroundTasks,
@@ -399,10 +393,10 @@ def create_app():  # noqa: C901
             )
 
         if completed_task.task_status == TaskStatus.FAILURE:
-            error_detail = await _get_task_error(orchestrator, task_id)
             raise HTTPException(
                 status_code=500,
-                detail=error_detail or "Task failed without additional details.",
+                detail=completed_task.error_message
+                or "Task failed without additional details.",
             )
 
         task_result = await orchestrator.task_result(task_id=task_id)
@@ -862,17 +856,13 @@ def create_app():  # noqa: C901
         except TaskNotFoundError:
             raise HTTPException(status_code=404, detail="Task not found.")
 
-        error_detail = None
-        if task.task_status == TaskStatus.FAILURE:
-            error_detail = await _get_task_error(orchestrator, task_id)
-
         return TaskStatusResponse(
             task_id=task.task_id,
             task_type=task.task_type,
             task_status=task.task_status,
             task_position=task_queue_position,
             task_meta=task.processing_meta,
-            error_detail=error_detail,
+            error_detail=task.error_message,
         )
 
     # Task status websocket
@@ -913,17 +903,13 @@ def create_app():  # noqa: C901
         try:
             task_queue_position = await orchestrator.get_queue_position(task_id=task_id)
 
-            init_error_detail = None
-            if task.task_status == TaskStatus.FAILURE:
-                init_error_detail = await _get_task_error(orchestrator, task_id)
-
             task_response = TaskStatusResponse(
                 task_id=task.task_id,
                 task_type=task.task_type,
                 task_status=task.task_status,
                 task_position=task_queue_position,
                 task_meta=task.processing_meta,
-                error_detail=init_error_detail,
+                error_detail=task.error_message,
             )
             await websocket.send_text(
                 WebsocketMessage(
@@ -941,17 +927,13 @@ def create_app():  # noqa: C901
                     task_id=task_id
                 )
 
-                error_detail = None
-                if task.task_status == TaskStatus.FAILURE:
-                    error_detail = await _get_task_error(orchestrator, task_id)
-
                 task_response = TaskStatusResponse(
                     task_id=task.task_id,
                     task_type=task.task_type,
                     task_status=task.task_status,
                     task_position=task_queue_position,
                     task_meta=task.processing_meta,
-                    error_detail=error_detail,
+                    error_detail=task.error_message,
                 )
                 await websocket.send_text(
                     WebsocketMessage(
@@ -994,10 +976,9 @@ def create_app():  # noqa: C901
                 try:
                     task = await orchestrator.task_status(task_id=task_id)
                     if task.task_status == TaskStatus.FAILURE:
-                        error_detail = await _get_task_error(orchestrator, task_id)
                         raise HTTPException(
                             status_code=500,
-                            detail=error_detail
+                            detail=task.error_message
                             or "Task failed without additional details.",
                         )
                 except TaskNotFoundError:

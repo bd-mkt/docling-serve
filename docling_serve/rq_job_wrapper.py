@@ -190,15 +190,6 @@ def instrumented_docling_task(  # noqa: C901
         except Exception as e:
             error_message = f"{type(e).__name__}: {e}"
 
-            # Store error message in Redis so API can retrieve it
-            try:
-                error_key = f"docling:tasks:{task_id}:error"
-                conn.setex(error_key, 86400, error_message)
-            except Exception as store_err:
-                logger.warning(
-                    f"Failed to store error for task {task_id}: {store_err}"
-                )
-
             # Notify task failure with retry
             published = False
             for attempt in range(2):
@@ -208,6 +199,7 @@ def instrumented_docling_task(  # noqa: C901
                         _TaskUpdate(
                             task_id=task_id,
                             task_status=TaskStatus.FAILURE,
+                            error_message=error_message,
                         ).model_dump_json(),
                     )
                     published = True
