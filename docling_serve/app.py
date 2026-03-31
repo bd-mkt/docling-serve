@@ -38,6 +38,7 @@ from scalar_fastapi import get_scalar_api_reference
 
 from docling.datamodel.base_models import DocumentStream
 from docling_jobkit.datamodel.callback import (
+    CallbackSpec,
     ProgressCallbackRequest,
     ProgressCallbackResponse,
 )
@@ -225,6 +226,7 @@ def create_app():  # noqa: C901
         enable_prometheus=docling_serve_settings.otel_enable_prometheus,
         enable_otlp_metrics=docling_serve_settings.otel_enable_otlp_metrics,
         redis_url=redis_url,
+        metrics_port=docling_serve_settings.metrics_port,
     )
 
     origins = docling_serve_settings.cors_origins
@@ -354,6 +356,7 @@ def create_app():  # noqa: C901
             chunking_options=chunking_options,
             chunking_export_options=chunking_export_options,
             target=request.target,
+            callbacks=request.callbacks,
         )
         return task
 
@@ -365,6 +368,7 @@ def create_app():  # noqa: C901
         chunking_options: BaseChunkerOptions | None,
         chunking_export_options: ChunkingExportOptions | None,
         target: TargetRequest,
+        callbacks: list[CallbackSpec] | None = None,
     ) -> Task:
         _log.info(f"Received {len(files)} files for processing.")
 
@@ -392,6 +396,7 @@ def create_app():  # noqa: C901
             chunking_options=chunking_options,
             chunking_export_options=chunking_export_options,
             target=target,
+            callbacks=callbacks or [],
         )
         return task
 
@@ -631,6 +636,7 @@ def create_app():  # noqa: C901
             chunking_options=None,
             chunking_export_options=None,
             target=target,
+            callbacks=[],
         )
         completed = await _wait_task_complete(
             orchestrator=orchestrator, task_id=task.task_id
@@ -708,6 +714,7 @@ def create_app():  # noqa: C901
             chunking_options=None,
             chunking_export_options=None,
             target=target,
+            callbacks=[],
         )
         task_queue_position = await orchestrator.get_queue_position(
             task_id=task.task_id
@@ -804,6 +811,7 @@ def create_app():  # noqa: C901
                     include_converted_doc=include_converted_doc
                 ),
                 target=target,
+                callbacks=[],
             )
             task_queue_position = await orchestrator.get_queue_position(
                 task_id=task.task_id
@@ -917,6 +925,7 @@ def create_app():  # noqa: C901
                     include_converted_doc=include_converted_doc
                 ),
                 target=target,
+                callbacks=[],
             )
             completed = await _wait_task_complete(
                 orchestrator=orchestrator, task_id=task.task_id
