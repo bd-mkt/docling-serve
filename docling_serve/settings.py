@@ -41,6 +41,7 @@ class AsyncEngine(str, enum.Enum):
     LOCAL = "local"
     KFP = "kfp"
     RQ = "rq"
+    RAY = "ray"
 
 
 class YamlConfigSettingsSource(PydanticBaseSettingsSource):
@@ -100,7 +101,6 @@ class DoclingServeSettings(BaseSettings):
     static_path: Optional[Path] = None
     scratch_path: Optional[Path] = None
     single_use_results: bool = True
-    result_removal_delay: float = 300  # 5 minutes
     load_models_at_boot: bool = True
     options_cache_size: int = 2
     enable_remote_services: bool = False
@@ -108,6 +108,10 @@ class DoclingServeSettings(BaseSettings):
     allow_custom_vlm_config: bool = False
     allow_custom_picture_description_config: bool = False
     allow_custom_code_formula_config: bool = False
+    allow_custom_table_structure_config: bool = False
+    allow_custom_layout_config: bool = False
+    allow_custom_picture_classification_config: bool = False
+    allow_custom_ocr_config: bool = False
     show_version_info: bool = True
     enable_management_endpoints: bool = False
 
@@ -132,6 +136,7 @@ class DoclingServeSettings(BaseSettings):
     cors_headers: list[str] = ["*"]
 
     eng_kind: AsyncEngine = AsyncEngine.LOCAL
+    result_removal_delay: int = 300  # seconds until result is removed after fetch
     # Local engine
     eng_loc_num_workers: int = 2
     eng_loc_share_models: bool = False
@@ -141,13 +146,17 @@ class DoclingServeSettings(BaseSettings):
     eng_rq_sub_channel: str = "docling:updates"
     eng_rq_results_ttl: int = 3_600 * 4  # 4 hours default
     eng_rq_failure_ttl: int = 3_600 * 4  # 4 hours default
-    eng_rq_redis_max_connections: int = 50  # Connection pool size
+    eng_rq_redis_max_connections: int = 50
     eng_rq_redis_socket_timeout: Optional[float] = None  # Socket timeout in seconds
     eng_rq_redis_socket_connect_timeout: Optional[float] = (
         None  # Socket connect timeout in seconds
     )
-    zombie_reaper_interval: float = 300.0
-    zombie_reaper_max_age: float = 3600.0
+    eng_rq_redis_gate_concurrency: Optional[int] = None
+    eng_rq_redis_gate_reserved_connections: int = 10
+    eng_rq_redis_gate_wait_timeout: float = 0.25
+    eng_rq_redis_gate_status_poll_wait_timeout: float = 5.0
+    eng_rq_zombie_reaper_interval: float = 300.0
+    eng_rq_zombie_reaper_max_age: float = 3600.0
     # KFP engine
     eng_kfp_endpoint: Optional[AnyUrl] = None
     eng_kfp_token: Optional[str] = None
@@ -157,6 +166,86 @@ class DoclingServeSettings(BaseSettings):
     eng_kfp_self_callback_ca_cert_path: Optional[Path] = None
 
     eng_kfp_experimental: bool = False
+
+    # Fair Ray engine
+    # Redis Configuration
+    eng_ray_redis_url: str = ""
+    eng_ray_redis_max_connections: int = 50
+    eng_ray_redis_socket_timeout: Optional[float] = None
+    eng_ray_redis_socket_connect_timeout: Optional[float] = None
+    eng_ray_redis_gate_concurrency: Optional[int] = None
+    eng_ray_redis_gate_reserved_connections: int = 10
+    eng_ray_redis_gate_wait_timeout: float = 0.25
+    eng_ray_redis_gate_status_poll_wait_timeout: float = 5.0
+
+    # Result Storage
+    eng_ray_results_ttl: int = 3_600 * 4  # 4 hours
+    eng_ray_results_prefix: str = "docling:ray:results"
+
+    # Pub/Sub
+    eng_ray_sub_channel: str = "docling:ray:updates"
+
+    # Fair Dispatcher
+    eng_ray_dispatcher_interval: float = 2.0
+
+    # Per-User Dispatcher Limits
+    eng_ray_max_concurrent_tasks: int = 5
+    eng_ray_max_queued_tasks: Optional[int] = None
+    eng_ray_enable_queue_limit_rejection: bool = False
+    eng_ray_max_documents: Optional[int] = None
+    eng_ray_enable_document_limits: bool = False
+
+    # Ray Configuration
+    eng_ray_address: str = ""  # Required - must be set explicitly
+    eng_ray_namespace: str = "docling"
+    eng_ray_runtime_env: Optional[dict] = None
+
+    # Ray mTLS Configuration
+    eng_ray_enable_mtls: bool = False
+    eng_ray_cluster_name: Optional[str] = None
+
+    # Ray Serve Autoscaling
+    eng_ray_min_actors: int = 1
+    eng_ray_max_actors: int = 10
+    eng_ray_target_requests_per_replica: int = 1
+    # Hard cap on concurrent in-flight requests per replica.
+    # None -> follow eng_ray_target_requests_per_replica.
+    eng_ray_max_ongoing_requests_per_replica: Optional[int] = None
+    eng_ray_upscale_delay_s: float = 30.0
+    eng_ray_downscale_delay_s: float = 600.0
+    eng_ray_num_cpus_per_actor: float = 1.0
+
+    # Fault Tolerance & Retry
+    eng_ray_max_task_retries: int = 3
+    eng_ray_retry_delay: float = 5.0
+    eng_ray_max_document_retries: int = 2
+
+    # Ray Actor Configuration
+    eng_ray_dispatcher_max_restarts: int = -1
+    eng_ray_dispatcher_max_task_retries: int = 3
+
+    # Timeouts
+    eng_ray_task_timeout: Optional[float] = 3600.0
+    eng_ray_document_timeout: Optional[float] = 300.0
+    eng_ray_redis_operation_timeout: float = 30.0
+
+    # Health Checks
+    eng_ray_enable_heartbeat: bool = True
+
+    # Resource Management & Memory Monitoring
+    eng_ray_memory_limit_per_actor: Optional[str] = None
+    eng_ray_object_store_memory: Optional[str] = None
+    eng_ray_enable_oom_protection: bool = True
+    eng_ray_memory_warning_threshold: float = 0.9
+
+    # Scratch Directory
+    eng_ray_scratch_dir: Optional[Path] = None
+
+    # Logging
+    eng_ray_log_level: str = "INFO"
+
+    # Tenant ID Header
+    eng_ray_tenant_id_header: str = "X-Tenant-Id"
 
     # OpenTelemetry settings
     otel_enable_metrics: bool = True
@@ -189,13 +278,31 @@ class DoclingServeSettings(BaseSettings):
     custom_code_formula_presets: dict[str, Any] = Field(default_factory=dict)
     allowed_code_formula_engines: Optional[list[str]] = None
 
+    # Picture Classification Control
+    default_picture_classification_preset: str = "document_figure_classifier_v2"
+    allowed_picture_classification_presets: Optional[list[str]] = None
+    custom_picture_classification_presets: dict[str, Any] = Field(default_factory=dict)
+
     # Table Structure Control
     default_table_structure_kind: str = "docling_tableformer"
     allowed_table_structure_kinds: Optional[list[str]] = None
+    default_table_structure_preset: str = "tableformer_v1_accurate"
+    allowed_table_structure_presets: Optional[list[str]] = None
+    custom_table_structure_presets: dict[str, Any] = Field(default_factory=dict)
 
     # Layout Control
     default_layout_kind: str = "docling_layout_default"
     allowed_layout_kinds: Optional[list[str]] = None
+    default_layout_preset: str = "docling_layout_default"
+    allowed_layout_presets: Optional[list[str]] = None
+    custom_layout_presets: dict[str, Any] = Field(default_factory=dict)
+
+    # OCR Control
+    default_ocr_preset: str = "auto"
+    default_ocr_kind: str = "auto"
+    allowed_ocr_presets: Optional[list[str]] = None
+    custom_ocr_presets: dict[str, Any] = Field(default_factory=dict)
+    allowed_ocr_kinds: Optional[list[str]] = None
 
     @classmethod
     def settings_customise_sources(
@@ -222,6 +329,10 @@ class DoclingServeSettings(BaseSettings):
         "custom_vlm_presets",
         "custom_picture_description_presets",
         "custom_code_formula_presets",
+        "custom_picture_classification_presets",
+        "custom_table_structure_presets",
+        "custom_layout_presets",
+        "custom_ocr_presets",
         mode="before",
     )
     @classmethod
@@ -248,8 +359,13 @@ class DoclingServeSettings(BaseSettings):
         "allowed_picture_description_engines",
         "allowed_code_formula_presets",
         "allowed_code_formula_engines",
+        "allowed_picture_classification_presets",
         "allowed_table_structure_kinds",
+        "allowed_table_structure_presets",
         "allowed_layout_kinds",
+        "allowed_layout_presets",
+        "allowed_ocr_presets",
+        "allowed_ocr_kinds",
         mode="before",
     )
     @classmethod
@@ -298,6 +414,17 @@ class DoclingServeSettings(BaseSettings):
         if self.eng_kind == AsyncEngine.RQ:
             if not self.eng_rq_redis_url:
                 raise ValueError("RQ Redis url is required when using the RQ engine.")
+
+        if self.eng_kind == AsyncEngine.RAY:
+            if not self.eng_ray_redis_url:
+                raise ValueError(
+                    "Fair Ray Redis URL is required when using the RAY engine."
+                )
+            if not self.eng_ray_address:
+                raise ValueError(
+                    "Fair Ray address is required when using the RAY engine. "
+                    "Use 'auto' or 'local' for local Ray, or provide a Ray cluster address."
+                )
 
         return self
 
